@@ -76,7 +76,12 @@ async function refreshModels() {
     }
 
     const count = models.length;
-    setStatus(count ? `${count} model${count === 1 ? "" : "s"} available` : "ACE-Step is running; no models listed", count ? "ok" : "pending");
+    const lazyLoaded = payload.health && payload.health.models_initialized === false;
+    if (count) {
+      setStatus(`${count} model${count === 1 ? "" : "s"} available${lazyLoaded ? "; lazy-loads on first request" : ""}`, "ok");
+    } else {
+      setStatus("ACE-Step is ready; default model will lazy-load on first request", "ok");
+    }
   } catch (error) {
     setStatus(error.message, "error");
   } finally {

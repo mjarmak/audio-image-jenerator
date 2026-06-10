@@ -30,7 +30,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/health") {
       const baseUrl = cleanBaseUrl(url.searchParams.get("baseUrl") || DEFAULT_ACE_STEP_URL);
       const [health, models] = await Promise.all([fetchAceHealth(baseUrl), fetchAceModels(baseUrl)]);
-      return sendJson(res, 200, { ok: true, baseUrl, health, models });
+      return sendJson(res, 200, { ok: true, baseUrl, health, models: mergeHealthModel(models, health) });
     }
 
     if (req.method === "POST" && url.pathname === "/api/generate") {
@@ -249,6 +249,21 @@ async function fetchAceModels(baseUrl) {
       }))
       .filter(model => model.name)
   };
+}
+
+function mergeHealthModel(models, health) {
+  const defaultModel = models.defaultModel || health.loaded_model || "";
+  const items = [...models.items];
+
+  if (defaultModel && !items.some(model => model.name === defaultModel)) {
+    items.unshift({
+      name: defaultModel,
+      isDefault: true,
+      isLoaded: health.models_initialized === undefined ? undefined : Boolean(health.models_initialized)
+    });
+  }
+
+  return { defaultModel, items };
 }
 
 async function waitForAceTask(baseUrl, taskId) {
