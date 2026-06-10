@@ -4,12 +4,16 @@ A no-dependency local web app that connects to the ACE-Step REST API at `http://
 
 ## Run
 
-1. Start the ACE-Step API server:
+1. Start the ACE-Step API server.
+
+For this AMD/ROCm setup, use ACE-Step's ROCm launcher:
 
 ```powershell
-cd C:\path\to\ACE-Step-1.5
-uv run acestep-api
+cd C:\Projects\ACE-Step-1.5
+.\start_api_server_rocm.bat
 ```
+
+Do not use plain `uv run acestep-api` for AMD on this machine. The default `uv` environment may use the CUDA `.venv`, while the working AMD environment is `venv_rocm`.
 
 2. Start this app:
 
@@ -44,7 +48,45 @@ This app wraps that workflow behind its own `/api/generate` endpoint so the brow
 
 ACE-Step requires generated audio durations of at least 10 seconds. The app requests WAV output by default.
 
-If ACE-Step reports `GPU Memory: 0.00 GB`, `Default LM Init: False`, and `Available LM Models: None`, leave **Thinking mode** off in this app. That uses ACE-Step's DiT-only path and avoids asking for a missing 5Hz LM model. CPU generation can be slow, so start with 10 seconds and 4 inference steps.
+## AMD / ROCm
+
+This machine uses an AMD ROCm environment at:
+
+```text
+C:\Projects\ACE-Step-1.5\venv_rocm
+```
+
+Verify GPU detection with:
+
+```powershell
+cd C:\Projects\ACE-Step-1.5
+$env:PYTHONIOENCODING="utf-8"
+$env:HSA_OVERRIDE_GFX_VERSION="11.0.0"
+$env:MIOPEN_FIND_MODE="FAST"
+.\venv_rocm\Scripts\python.exe scripts\check_gpu.py
+```
+
+Expected result includes:
+
+```text
+PyTorch installed: 2.9.1+rocmsdk...
+Build type: ROCm
+torch.cuda.is_available(): True
+GPU 0: AMD Radeon RX 7900 XT
+```
+
+If you prefer using `uv run`, point it at `venv_rocm`:
+
+```powershell
+cd C:\Projects\ACE-Step-1.5
+$env:PYTHONIOENCODING="utf-8"
+$env:HSA_OVERRIDE_GFX_VERSION="11.0.0"
+$env:MIOPEN_FIND_MODE="FAST"
+$env:UV_PROJECT_ENVIRONMENT="venv_rocm"
+C:\Users\moham\.local\bin\uv.exe run --no-sync python scripts\check_gpu.py
+```
+
+If ACE-Step reports `GPU Memory: 0.00 GB`, it is probably running from the wrong environment. Stop it and start again with `.\start_api_server_rocm.bat`.
 
 ## If ACE-Step is not responding
 
