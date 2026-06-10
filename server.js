@@ -2,11 +2,12 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = getRequestedPort();
 const DEFAULT_LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SAMPLE_RATE = 44100;
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_PORT_ATTEMPTS = 20;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -101,10 +102,46 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`LM Studio WAV Generator running at http://localhost:${PORT}`);
-  console.log(`LM Studio endpoint: ${DEFAULT_LM_STUDIO_URL}`);
-});
+listenWithFallback(PORT);
+
+function listenWithFallback(port, attempt = 0) {
+  server.once("error", error => {
+    if (error.code === "EADDRINUSE" && attempt < MAX_PORT_ATTEMPTS) {
+      const nextPort = port + 1;
+      console.warn(`Port ${port} is already in use. Trying ${nextPort}...`);
+      listenWithFallback(nextPort, attempt + 1);
+      return;
+    }
+
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+
+  server.listen(port, () => {
+    const address = server.address();
+    const actualPort = typeof address === "object" && address ? address.port : port;
+    console.log(`LM Studio WAV Generator running at http://localhost:${actualPort}`);
+    console.log(`LM Studio endpoint: ${DEFAULT_LM_STUDIO_URL}`);
+  });
+}
+
+function getRequestedPort() {
+  const args = process.argv.slice(2);
+  const portFlagIndex = args.findIndex(arg => arg === "--port" || arg === "-p");
+  const portFlagValue = args.find(arg => arg.startsWith("--port="));
+  const rawPort =
+    portFlagValue?.split("=")[1] ||
+    (portFlagIndex >= 0 ? args[portFlagIndex + 1] : undefined) ||
+    process.env.PORT ||
+    "3000";
+  const port = Number(rawPort);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid port: ${rawPort}`);
+  }
+
+  return port;
+}
 
 function serveStatic(requestPath, res) {
   const safePath = requestPath === "/" ? "/index.html" : decodeURIComponent(requestPath);
