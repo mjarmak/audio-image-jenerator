@@ -44,6 +44,8 @@ This app wraps that workflow behind its own `/api/generate` endpoint so the brow
 
 ACE-Step requires generated audio durations of at least 10 seconds. The app requests WAV output by default.
 
+If ACE-Step reports `GPU Memory: 0.00 GB`, `Default LM Init: False`, and `Available LM Models: None`, leave **Thinking mode** off in this app. That uses ACE-Step's DiT-only path and avoids asking for a missing 5Hz LM model. CPU generation can be slow, so start with 10 seconds and 4 inference steps.
+
 ## If ACE-Step is not responding
 
 Confirm the API server is reachable:

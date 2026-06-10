@@ -8,7 +8,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_PORT_ATTEMPTS = 20;
 const POLL_INTERVAL_MS = 2000;
-const GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
+const GENERATION_TIMEOUT_MS = 60 * 60 * 1000;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
