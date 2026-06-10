@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>LM Studio WAV Generator</title>
+    <title>ACE-Step Music Generator</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -11,8 +11,8 @@
       <section class="workspace" aria-labelledby="app-title">
         <div class="topbar">
           <div>
-            <p class="eyebrow">Local audio lab</p>
-            <h1 id="app-title">LM Studio WAV Generator</h1>
+            <p class="eyebrow">Local music lab</p>
+            <h1 id="app-title">ACE-Step Music Generator</h1>
           </div>
           <button id="refresh-models" class="secondary" type="button">Refresh</button>
         </div>
@@ -20,38 +20,55 @@
         <form id="generator-form" class="generator-form">
           <div class="field-row">
             <label class="field">
-              <span>LM Studio URL</span>
-              <input id="base-url" name="baseUrl" type="url" value="http://localhost:1234" autocomplete="off">
+              <span>ACE-Step API URL</span>
+              <input id="base-url" name="baseUrl" type="url" value="http://localhost:8001" autocomplete="off">
             </label>
             <label class="field">
-              <span>Model</span>
+              <span>DiT Model</span>
               <select id="model" name="model">
-                <option value="">Auto</option>
+                <option value="">Default</option>
               </select>
             </label>
           </div>
 
           <label class="field prompt-field">
             <span>Prompt</span>
-            <textarea id="prompt" name="prompt" rows="7">warm analog synth melody with soft rain percussion</textarea>
+            <textarea id="prompt" name="prompt" rows="5">warm analog synth melody with soft rain percussion</textarea>
+          </label>
+
+          <label class="field lyrics-field">
+            <span>Lyrics</span>
+            <textarea id="lyrics" name="lyrics" rows="4" placeholder="Optional lyrics"></textarea>
           </label>
 
           <div class="field-row compact">
             <label class="field">
               <span>Duration</span>
-              <input id="duration" name="duration" type="range" min="3" max="30" step="1" value="12">
-              <output id="duration-output" for="duration">12s</output>
+              <input id="duration" name="duration" type="range" min="10" max="180" step="5" value="30">
+              <output id="duration-output" for="duration">30s</output>
             </label>
             <label class="field">
-              <span>Temperature</span>
-              <input id="temperature" name="temperature" type="range" min="0.1" max="1.4" step="0.1" value="0.8">
-              <output id="temperature-output" for="temperature">0.8</output>
+              <span>Inference Steps</span>
+              <input id="steps" name="steps" type="range" min="1" max="32" step="1" value="8">
+              <output id="steps-output" for="steps">8</output>
+            </label>
+          </div>
+
+          <div class="field-row compact">
+            <label class="field">
+              <span>LM Temperature</span>
+              <input id="temperature" name="temperature" type="range" min="0.1" max="1.4" step="0.05" value="0.85">
+              <output id="temperature-output" for="temperature">0.85</output>
+            </label>
+            <label class="toggle-field">
+              <input id="thinking" name="thinking" type="checkbox" checked>
+              <span>Thinking mode</span>
             </label>
           </div>
 
           <div class="actions">
-            <button id="generate" class="primary" type="submit">Generate WAV</button>
-            <a id="download" class="secondary hidden" download="lm-studio-audio.wav">Download WAV</a>
+            <button id="generate" class="primary" type="submit">Generate Music</button>
+            <a id="download" class="secondary hidden" download="ace-step-audio.wav">Download Audio</a>
           </div>
         </form>
       </section>
@@ -66,13 +83,13 @@
         </div>
 
         <div id="result" class="result hidden">
-          <h2 id="result-title">Generated audio</h2>
+          <h2 id="result-title">Generated music</h2>
           <p id="result-description"></p>
           <audio id="audio" controls></audio>
         </div>
 
-        <details class="plan-view">
-          <summary>Sound plan</summary>
+        <details class="plan-view sound-plan">
+          <summary>Generation details</summary>
           <pre id="plan-json">{}</pre>
         </details>
       </aside>

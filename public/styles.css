@@ -153,6 +153,10 @@ textarea {
   line-height: 1.45;
 }
 
+.lyrics-field textarea {
+  min-height: 118px;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -169,6 +173,21 @@ input[type="range"] {
 output {
   color: var(--ink);
   font-weight: 800;
+}
+
+.toggle-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.toggle-field input {
+  width: 20px;
+  min-height: 20px;
+  accent-color: var(--teal);
 }
 
 button,
@@ -252,9 +271,12 @@ audio {
 }
 
 .plan-view {
-  margin-top: auto;
   border-top: 1px solid var(--line);
   padding-top: 18px;
+}
+
+.sound-plan {
+  margin-top: auto;
 }
 
 summary {

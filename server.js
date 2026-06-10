@@ -3,11 +3,12 @@ const fs = require("fs");
 const path = require("path");
 
 const PORT = getRequestedPort();
-const DEFAULT_LM_STUDIO_URL = process.env.LM_STUDIO_URL || "http://localhost:1234";
+const DEFAULT_ACE_STEP_URL = process.env.ACE_STEP_URL || "http://localhost:8001";
 const PUBLIC_DIR = path.join(__dirname, "public");
-const SAMPLE_RATE = 44100;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_PORT_ATTEMPTS = 20;
+const POLL_INTERVAL_MS = 2000;
+const GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -16,26 +17,6 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".wav": "audio/wav"
-};
-
-const NOTE_OFFSETS = {
-  C: 0,
-  "C#": 1,
-  DB: 1,
-  D: 2,
-  "D#": 3,
-  EB: 3,
-  E: 4,
-  F: 5,
-  "F#": 6,
-  GB: 6,
-  G: 7,
-  "G#": 8,
-  AB: 8,
-  A: 9,
-  "A#": 10,
-  BB: 10,
-  B: 11
 };
 
 const server = http.createServer(async (req, res) => {
@@ -47,48 +28,15 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
     if (req.method === "GET" && url.pathname === "/api/health") {
-      const baseUrl = cleanBaseUrl(url.searchParams.get("baseUrl") || DEFAULT_LM_STUDIO_URL);
-      const models = await fetchLmStudioModels(baseUrl);
-      return sendJson(res, 200, { ok: true, baseUrl, models });
+      const baseUrl = cleanBaseUrl(url.searchParams.get("baseUrl") || DEFAULT_ACE_STEP_URL);
+      const [health, models] = await Promise.all([fetchAceHealth(baseUrl), fetchAceModels(baseUrl)]);
+      return sendJson(res, 200, { ok: true, baseUrl, health, models });
     }
 
     if (req.method === "POST" && url.pathname === "/api/generate") {
       const requestBody = await readJson(req);
-      const baseUrl = cleanBaseUrl(requestBody.baseUrl || DEFAULT_LM_STUDIO_URL);
-      const prompt = String(requestBody.prompt || "").trim();
-      const model = String(requestBody.model || "").trim();
-      const durationSeconds = clamp(Number(requestBody.durationSeconds || 12), 3, 30);
-      const temperature = clamp(Number(requestBody.temperature || 0.8), 0.1, 1.4);
-
-      if (!prompt) {
-        return sendJson(res, 400, { ok: false, error: "Enter a prompt before generating audio." });
-      }
-
-      const { plan, usedFallback, rawModelText } = await createAudioPlan({
-        baseUrl,
-        model,
-        prompt,
-        durationSeconds,
-        temperature
-      });
-
-      const normalizedPlan = normalizePlan(plan, prompt, durationSeconds);
-      const wavBuffer = renderWav(normalizedPlan, durationSeconds);
-      const title = normalizedPlan.title || "lm-studio-audio";
-
-      return sendJson(res, 200, {
-        ok: true,
-        usedFallback,
-        rawModelText: usedFallback ? rawModelText : undefined,
-        plan: normalizedPlan,
-        audio: {
-          base64: wavBuffer.toString("base64"),
-          mimeType: "audio/wav",
-          durationSeconds,
-          sampleRate: SAMPLE_RATE,
-          fileName: `${slugify(title)}.wav`
-        }
-      });
+      const result = await generateWithAceStep(requestBody);
+      return sendJson(res, 200, { ok: true, ...result });
     }
 
     if (req.method === "GET") {
@@ -120,8 +68,8 @@ function listenWithFallback(port, attempt = 0) {
   server.listen(port, () => {
     const address = server.address();
     const actualPort = typeof address === "object" && address ? address.port : port;
-    console.log(`LM Studio WAV Generator running at http://localhost:${actualPort}`);
-    console.log(`LM Studio endpoint: ${DEFAULT_LM_STUDIO_URL}`);
+    console.log(`ACE-Step Music Generator running at http://localhost:${actualPort}`);
+    console.log(`ACE-Step endpoint: ${DEFAULT_ACE_STEP_URL}`);
   });
 }
 
@@ -189,8 +137,7 @@ function readJson(req) {
     req.on("data", chunk => {
       total += chunk.length;
       if (total > MAX_BODY_BYTES) {
-        const error = new Error("Request body is too large.");
-        error.statusCode = 413;
+        const error = createHttpError(413, "Request body is too large.");
         req.destroy(error);
         return;
       }
@@ -201,9 +148,7 @@ function readJson(req) {
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch {
-        const error = new Error("Request body must be valid JSON.");
-        error.statusCode = 400;
-        reject(error);
+        reject(createHttpError(400, "Request body must be valid JSON."));
       }
     });
 
@@ -211,468 +156,212 @@ function readJson(req) {
   });
 }
 
-function cleanBaseUrl(value) {
-  const url = new URL(value);
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("LM Studio URL must start with http:// or https://.");
+async function generateWithAceStep(requestBody) {
+  const baseUrl = cleanBaseUrl(requestBody.baseUrl || DEFAULT_ACE_STEP_URL);
+  const prompt = String(requestBody.prompt || "").trim();
+  const lyrics = String(requestBody.lyrics || "").trim();
+  const model = String(requestBody.model || "").trim();
+  const durationSeconds = clamp(Number(requestBody.durationSeconds || 30), 10, 600);
+  const inferenceSteps = clamp(Number(requestBody.inferenceSteps || 8), 1, 200);
+  const lmTemperature = clamp(Number(requestBody.temperature || 0.85), 0.1, 1.4);
+  const thinking = Boolean(requestBody.thinking);
+
+  if (!prompt) {
+    throw createHttpError(400, "Enter a music prompt before generating.");
   }
-  return url.origin;
+
+  const releasePayload = {
+    prompt,
+    lyrics,
+    thinking,
+    audio_format: "wav",
+    audio_duration: durationSeconds,
+    inference_steps: inferenceSteps,
+    lm_temperature: lmTemperature,
+    batch_size: 1,
+    task_type: "text2music",
+    use_random_seed: true
+  };
+
+  if (model) {
+    releasePayload.model = model;
+  }
+
+  const released = await postAceJson(baseUrl, "/release_task", releasePayload, 30000);
+  const taskId = released?.data?.task_id;
+
+  if (!taskId) {
+    throw createHttpError(502, "ACE-Step did not return a task id.");
+  }
+
+  const taskResult = await waitForAceTask(baseUrl, taskId);
+  const audioUrl = getTaskAudioUrl(taskResult);
+  const downloaded = await downloadAceAudio(baseUrl, audioUrl);
+  const metas = taskResult.metas && typeof taskResult.metas === "object" ? taskResult.metas : {};
+  const title = taskResult.prompt || prompt;
+
+  return {
+    taskId,
+    plan: {
+      title: clampText(title, 80),
+      description: taskResult.generation_info || "Generated by ACE-Step",
+      prompt: taskResult.prompt || prompt,
+      lyrics: taskResult.lyrics || lyrics,
+      model: taskResult.dit_model || model || "",
+      lmModel: taskResult.lm_model || "",
+      seed: taskResult.seed_value || "",
+      metas
+    },
+    audio: {
+      base64: downloaded.buffer.toString("base64"),
+      mimeType: downloaded.mimeType,
+      durationSeconds: Number(metas.duration || durationSeconds),
+      fileName: `${slugify(title)}.${downloaded.extension}`
+    }
+  };
 }
 
-async function fetchLmStudioModels(baseUrl) {
-  const response = await fetchWithTimeout(`${baseUrl}/v1/models`, {
+async function fetchAceHealth(baseUrl) {
+  const response = await fetchWithTimeout(`${baseUrl}/health`, {
     method: "GET",
     timeoutMs: 5000
   });
-
-  if (!response.ok) {
-    throw new Error(`LM Studio returned ${response.status} when listing models.`);
-  }
-
-  const data = await response.json();
-  return Array.isArray(data.data) ? data.data.map(model => model.id).filter(Boolean) : [];
+  const payload = await readAceResponse(response, "checking ACE-Step health");
+  return payload.data || {};
 }
 
-async function createAudioPlan({ baseUrl, model, prompt, durationSeconds, temperature }) {
-  const models = model ? [model] : await fetchLmStudioModels(baseUrl);
-  const selectedModel = model || models[0];
+async function fetchAceModels(baseUrl) {
+  const response = await fetchWithTimeout(`${baseUrl}/v1/models`, {
+    method: "GET",
+    timeoutMs: 10000
+  });
+  const payload = await readAceResponse(response, "listing ACE-Step models");
+  const data = payload.data || {};
+  const models = Array.isArray(data.models) ? data.models : [];
 
-  if (!selectedModel) {
-    throw new Error("No model is loaded in LM Studio. Load a chat model, then try again.");
+  return {
+    defaultModel: data.default_model || "",
+    items: models
+      .map(model => ({
+        name: String(model.name || model.id || model).trim(),
+        isDefault: Boolean(model.is_default),
+        isLoaded: model.is_loaded === undefined ? undefined : Boolean(model.is_loaded)
+      }))
+      .filter(model => model.name)
+  };
+}
+
+async function waitForAceTask(baseUrl, taskId) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < GENERATION_TIMEOUT_MS) {
+    await delay(POLL_INTERVAL_MS);
+
+    const payload = await postAceJson(baseUrl, "/query_result", { task_id_list: [taskId] }, 30000);
+    const task = Array.isArray(payload.data) ? payload.data.find(item => item.task_id === taskId) || payload.data[0] : null;
+
+    if (!task) {
+      continue;
+    }
+    if (task.status === 0 || task.status === "queued" || task.status === "running") {
+      continue;
+    }
+    if (task.status === 2 || task.status === "failed") {
+      throw createHttpError(502, `ACE-Step generation failed${task.error ? `: ${task.error}` : "."}`);
+    }
+    if (task.status === 1 || task.status === "succeeded") {
+      return parseAceTaskResult(task);
+    }
   }
 
-  const messages = [
-    {
-      role: "system",
-      content: [
-        "You are an audio director for a procedural WAV synthesizer.",
-        "Return only strict JSON. Do not use markdown, comments, prose, or trailing commas.",
-        "The JSON must describe a short instrumental sound plan, not speech.",
-        "Use musically useful note events and keep event counts compact."
-      ].join(" ")
-    },
-    {
-      role: "user",
-      content: buildPlanPrompt(prompt, durationSeconds)
-    }
-  ];
+  throw createHttpError(504, "Timed out while waiting for ACE-Step to finish generation.");
+}
 
-  const response = await fetchWithTimeout(`${baseUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: selectedModel,
-      messages,
-      temperature,
-      max_tokens: 1800
-    }),
-    timeoutMs: 30000
+function parseAceTaskResult(task) {
+  if (!task.result) {
+    throw createHttpError(502, "ACE-Step task succeeded without a result.");
+  }
+
+  const parsed = typeof task.result === "string" ? JSON.parse(task.result) : task.result;
+  const results = Array.isArray(parsed) ? parsed : [parsed];
+  const usable = results.find(result => result && (result.file || result.audio_url || result.url));
+
+  if (!usable) {
+    throw createHttpError(502, "ACE-Step result did not include an audio file URL.");
+  }
+
+  return usable;
+}
+
+function getTaskAudioUrl(taskResult) {
+  return String(taskResult.file || taskResult.audio_url || taskResult.url || "").trim();
+}
+
+async function downloadAceAudio(baseUrl, audioUrl) {
+  const url = buildAceUrl(baseUrl, audioUrl);
+  const response = await fetchWithTimeout(url, {
+    method: "GET",
+    timeoutMs: 120000
   });
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`LM Studio returned ${response.status}: ${text || response.statusText}`);
+    throw createHttpError(502, `ACE-Step returned ${response.status} while downloading audio: ${text || response.statusText}`);
   }
 
-  const data = await response.json();
-  const rawModelText = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || "";
+  const mimeType = response.headers.get("content-type") || inferMimeType(url);
+  const buffer = Buffer.from(await response.arrayBuffer());
 
-  try {
-    return {
-      plan: parseJsonFromModelText(rawModelText),
-      rawModelText,
-      usedFallback: false
-    };
-  } catch {
-    return {
-      plan: createFallbackPlan(prompt, durationSeconds),
-      rawModelText,
-      usedFallback: true
-    };
-  }
-}
-
-function buildPlanPrompt(prompt, durationSeconds) {
-  return [
-    `Create a ${durationSeconds.toFixed(1)} second sound plan for this prompt: ${JSON.stringify(prompt)}.`,
-    "Return this exact shape:",
-    "{",
-    '  "title": "short filename-safe title",',
-    '  "description": "one short phrase",',
-    '  "bpm": 60-150,',
-    '  "tracks": [',
-    "    {",
-    '      "name": "track name",',
-    '      "waveform": "sine|triangle|square|sawtooth|noise",',
-    '      "gain": 0.05-0.8,',
-    '      "pan": -1 to 1,',
-    '      "attack": 0.001-0.8,',
-    '      "decay": 0-0.8,',
-    '      "sustain": 0.05-1,',
-    '      "release": 0.01-1.5,',
-    '      "events": [',
-    '        {"time": 0, "duration": 0.5, "note": "C4", "frequency": 261.63, "velocity": 0.1-1}',
-    "      ]",
-    "    }",
-    "  ]",
-    "}",
-    "Rules: include 2 to 5 tracks. Put all events between time 0 and the requested duration.",
-    "Use note or frequency for pitched events. Use waveform noise for wind, percussion, surf, static, or texture.",
-    "Keep the total number of events under 90."
-  ].join("\n");
-}
-
-function parseJsonFromModelText(text) {
-  const trimmed = String(text || "").trim();
-
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start === -1 || end === -1 || end <= start) {
-      throw new Error("Model response did not contain JSON.");
-    }
-    return JSON.parse(trimmed.slice(start, end + 1));
-  }
-}
-
-function normalizePlan(plan, prompt, durationSeconds) {
-  const fallback = createFallbackPlan(prompt, durationSeconds);
-  const source = plan && typeof plan === "object" ? plan : fallback;
-  const title = clampText(source.title || fallback.title, 64);
-  const description = clampText(source.description || fallback.description, 140);
-  const bpm = clamp(Number(source.bpm || fallback.bpm), 45, 180);
-  const tracks = Array.isArray(source.tracks) ? source.tracks.slice(0, 6) : [];
-  const normalizedTracks = tracks.map((track, index) => normalizeTrack(track, index, durationSeconds)).filter(Boolean);
-
-  return {
-    title,
-    description,
-    bpm,
-    sampleRate: SAMPLE_RATE,
-    durationSeconds,
-    tracks: normalizedTracks.length ? normalizedTracks : fallback.tracks
-  };
-}
-
-function normalizeTrack(track, index, durationSeconds) {
-  if (!track || typeof track !== "object") {
-    return null;
-  }
-
-  const waveform = normalizeWaveform(track.waveform);
-  const events = Array.isArray(track.events) ? track.events.slice(0, 100) : [];
-  const normalizedEvents = events
-    .map(event => normalizeEvent(event, durationSeconds))
-    .filter(Boolean)
-    .sort((a, b) => a.time - b.time);
-
-  if (!normalizedEvents.length) {
-    return null;
+  if (!buffer.length) {
+    throw createHttpError(502, "ACE-Step returned an empty audio file.");
   }
 
   return {
-    name: clampText(track.name || `Track ${index + 1}`, 40),
-    waveform,
-    gain: clamp(Number(track.gain ?? 0.4), 0.02, 0.9),
-    pan: clamp(Number(track.pan ?? 0), -1, 1),
-    attack: clamp(Number(track.attack ?? 0.01), 0.001, 1),
-    decay: clamp(Number(track.decay ?? 0.08), 0, 1),
-    sustain: clamp(Number(track.sustain ?? 0.65), 0.02, 1),
-    release: clamp(Number(track.release ?? 0.1), 0.005, 2),
-    events: normalizedEvents
+    buffer,
+    mimeType,
+    extension: extensionFromMimeType(mimeType, url)
   };
 }
 
-function normalizeEvent(event, durationSeconds) {
-  if (!event || typeof event !== "object") {
-    return null;
-  }
+async function postAceJson(baseUrl, pathname, payload, timeoutMs) {
+  const response = await fetchWithTimeout(`${baseUrl}${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs
+  });
 
-  const time = clamp(Number(event.time ?? 0), 0, durationSeconds - 0.02);
-  const duration = clamp(Number(event.duration ?? 0.4), 0.02, durationSeconds - time);
-  const noteFrequency = noteToFrequency(event.note);
-  const frequency = clamp(Number(event.frequency || noteFrequency || 220), 20, 6000);
-  const velocity = clamp(Number(event.velocity ?? 0.7), 0.03, 1);
-
-  return { time, duration, frequency, velocity };
+  return readAceResponse(response, `calling ACE-Step ${pathname}`);
 }
 
-function normalizeWaveform(waveform) {
-  const normalized = String(waveform || "").toLowerCase();
-  return ["sine", "triangle", "square", "sawtooth", "noise"].includes(normalized) ? normalized : "sine";
+async function readAceResponse(response, action) {
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json") ? await response.json() : { detail: await response.text() };
+
+  if (!response.ok) {
+    throw createHttpError(response.status, `ACE-Step returned ${response.status} while ${action}: ${payload.detail || payload.error || response.statusText}`);
+  }
+  if (payload.code && payload.code !== 200) {
+    throw createHttpError(502, `ACE-Step failed while ${action}: ${payload.error || payload.detail || `code ${payload.code}`}`);
+  }
+
+  return payload;
 }
 
-function createFallbackPlan(prompt, durationSeconds) {
-  const seed = hashString(prompt);
-  const moods = [
-    ["C4", "E4", "G4", "B4", "A4", "G4", "E4", "D4"],
-    ["A3", "C4", "E4", "G4", "F4", "E4", "C4", "B3"],
-    ["D4", "F4", "A4", "C5", "B4", "A4", "F4", "E4"],
-    ["G3", "B3", "D4", "F4", "E4", "D4", "B3", "A3"]
-  ];
-  const scale = moods[seed % moods.length];
-  const bpm = 72 + (seed % 48);
-  const beat = 60 / bpm;
-  const events = [];
-  const bassEvents = [];
-  const textureEvents = [];
-
-  for (let time = 0, index = 0; time < durationSeconds - 0.05; time += beat, index += 1) {
-    const note = scale[(index + seed) % scale.length];
-    events.push({
-      time: round(time),
-      duration: round(Math.min(beat * 0.82, durationSeconds - time)),
-      note,
-      velocity: 0.45 + ((seed + index) % 5) * 0.08
-    });
+function buildAceUrl(baseUrl, value) {
+  if (/^https?:\/\//i.test(value)) {
+    return value;
   }
 
-  for (let time = 0, index = 0; time < durationSeconds - 0.05; time += beat * 2, index += 1) {
-    const root = scale[(index * 2 + seed) % scale.length].replace(/\d$/, "2");
-    bassEvents.push({
-      time: round(time),
-      duration: round(Math.min(beat * 1.55, durationSeconds - time)),
-      note: root,
-      velocity: 0.5
-    });
-  }
-
-  for (let time = 0; time < durationSeconds - 0.05; time += beat / 2) {
-    textureEvents.push({
-      time: round(time),
-      duration: round(Math.min(0.045, durationSeconds - time)),
-      frequency: 800 + (seed % 500),
-      velocity: 0.14
-    });
-  }
-
-  return {
-    title: prompt ? `Local sketch ${prompt.slice(0, 28)}` : "Local sketch",
-    description: "Fallback procedural sound plan",
-    bpm,
-    sampleRate: SAMPLE_RATE,
-    durationSeconds,
-    tracks: [
-      {
-        name: "Lead",
-        waveform: "triangle",
-        gain: 0.32,
-        pan: -0.15,
-        attack: 0.012,
-        decay: 0.08,
-        sustain: 0.5,
-        release: 0.16,
-        events
-      },
-      {
-        name: "Bass",
-        waveform: "sine",
-        gain: 0.34,
-        pan: 0,
-        attack: 0.02,
-        decay: 0.12,
-        sustain: 0.68,
-        release: 0.25,
-        events: bassEvents
-      },
-      {
-        name: "Texture",
-        waveform: "noise",
-        gain: 0.22,
-        pan: 0.24,
-        attack: 0.001,
-        decay: 0.02,
-        sustain: 0.2,
-        release: 0.04,
-        events: textureEvents
-      }
-    ]
-  };
+  return new URL(value.startsWith("/") ? value : `/${value}`, baseUrl).toString();
 }
 
-function renderWav(plan, durationSeconds) {
-  const sampleCount = Math.floor(durationSeconds * SAMPLE_RATE);
-  const left = new Float32Array(sampleCount);
-  const right = new Float32Array(sampleCount);
-
-  for (const track of plan.tracks) {
-    const pan = clamp(track.pan, -1, 1);
-    const leftGain = Math.cos(((pan + 1) * Math.PI) / 4);
-    const rightGain = Math.sin(((pan + 1) * Math.PI) / 4);
-
-    for (const event of track.events) {
-      renderEvent({ left, right, track, event, leftGain, rightGain, sampleCount });
-    }
+function cleanBaseUrl(value) {
+  const url = new URL(value);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("ACE-Step URL must start with http:// or https://.");
   }
-
-  applySoftDelay(left, right, 0.12, 0.16);
-  applyFadeOut(left, right, Math.min(0.12, durationSeconds / 8));
-  normalizeStereo(left, right);
-  return encodeWav(left, right);
-}
-
-function renderEvent({ left, right, track, event, leftGain, rightGain, sampleCount }) {
-  const startSample = Math.floor(event.time * SAMPLE_RATE);
-  const eventSamples = Math.max(1, Math.floor(event.duration * SAMPLE_RATE));
-  const endSample = Math.min(sampleCount, startSample + eventSamples);
-  const baseGain = track.gain * event.velocity;
-  let phase = 0;
-  const phaseStep = (2 * Math.PI * event.frequency) / SAMPLE_RATE;
-  let randomState = hashString(`${track.name}:${event.time}:${event.frequency}`) || 1;
-
-  for (let sample = startSample; sample < endSample; sample += 1) {
-    const localTime = (sample - startSample) / SAMPLE_RATE;
-    const env = envelope(localTime, event.duration, track.attack, track.decay, track.sustain, track.release);
-    const oscillator = sampleWaveform(track.waveform, phase, randomState);
-
-    randomState = oscillator.nextState;
-    const value = oscillator.value * env * baseGain;
-    left[sample] += value * leftGain;
-    right[sample] += value * rightGain;
-    phase += phaseStep;
-  }
-}
-
-function sampleWaveform(waveform, phase, randomState) {
-  if (waveform === "noise") {
-    const nextState = (1664525 * randomState + 1013904223) >>> 0;
-    return { value: (nextState / 0xffffffff) * 2 - 1, nextState };
-  }
-
-  if (waveform === "square") {
-    return { value: Math.sin(phase) >= 0 ? 1 : -1, nextState: randomState };
-  }
-
-  if (waveform === "triangle") {
-    return { value: (2 / Math.PI) * Math.asin(Math.sin(phase)), nextState: randomState };
-  }
-
-  if (waveform === "sawtooth") {
-    const cycle = phase / (2 * Math.PI);
-    return { value: 2 * (cycle - Math.floor(cycle + 0.5)), nextState: randomState };
-  }
-
-  return { value: Math.sin(phase), nextState: randomState };
-}
-
-function envelope(time, duration, attack, decay, sustain, release) {
-  const safeAttack = Math.min(attack, duration * 0.4);
-  const safeRelease = Math.min(release, duration * 0.45);
-  const safeDecay = Math.min(decay, Math.max(0, duration - safeAttack - safeRelease));
-
-  if (time < safeAttack) {
-    return time / Math.max(safeAttack, 0.001);
-  }
-
-  if (time < safeAttack + safeDecay) {
-    const progress = (time - safeAttack) / Math.max(safeDecay, 0.001);
-    return 1 - (1 - sustain) * progress;
-  }
-
-  if (time > duration - safeRelease) {
-    const remaining = Math.max(0, duration - time);
-    return sustain * (remaining / Math.max(safeRelease, 0.001));
-  }
-
-  return sustain;
-}
-
-function applySoftDelay(left, right, seconds, amount) {
-  const delaySamples = Math.floor(seconds * SAMPLE_RATE);
-  if (delaySamples <= 0) {
-    return;
-  }
-
-  for (let index = delaySamples; index < left.length; index += 1) {
-    left[index] += right[index - delaySamples] * amount;
-    right[index] += left[index - delaySamples] * amount;
-  }
-}
-
-function applyFadeOut(left, right, seconds) {
-  const fadeSamples = Math.floor(seconds * SAMPLE_RATE);
-  const start = Math.max(0, left.length - fadeSamples);
-
-  for (let index = start; index < left.length; index += 1) {
-    const gain = (left.length - index) / Math.max(1, fadeSamples);
-    left[index] *= gain;
-    right[index] *= gain;
-  }
-}
-
-function normalizeStereo(left, right) {
-  let peak = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    peak = Math.max(peak, Math.abs(left[index]), Math.abs(right[index]));
-  }
-
-  if (peak <= 0.92) {
-    return;
-  }
-
-  const scale = 0.92 / peak;
-  for (let index = 0; index < left.length; index += 1) {
-    left[index] *= scale;
-    right[index] *= scale;
-  }
-}
-
-function encodeWav(left, right) {
-  const channels = 2;
-  const bitsPerSample = 16;
-  const bytesPerSample = bitsPerSample / 8;
-  const blockAlign = channels * bytesPerSample;
-  const byteRate = SAMPLE_RATE * blockAlign;
-  const dataSize = left.length * blockAlign;
-  const buffer = Buffer.alloc(44 + dataSize);
-
-  buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + dataSize, 4);
-  buffer.write("WAVE", 8);
-  buffer.write("fmt ", 12);
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(channels, 22);
-  buffer.writeUInt32LE(SAMPLE_RATE, 24);
-  buffer.writeUInt32LE(byteRate, 28);
-  buffer.writeUInt16LE(blockAlign, 32);
-  buffer.writeUInt16LE(bitsPerSample, 34);
-  buffer.write("data", 36);
-  buffer.writeUInt32LE(dataSize, 40);
-
-  let offset = 44;
-  for (let index = 0; index < left.length; index += 1) {
-    buffer.writeInt16LE(floatToPcm16(left[index]), offset);
-    buffer.writeInt16LE(floatToPcm16(right[index]), offset + 2);
-    offset += 4;
-  }
-
-  return buffer;
-}
-
-function floatToPcm16(value) {
-  const clamped = clamp(value, -1, 1);
-  return Math.round(clamped < 0 ? clamped * 32768 : clamped * 32767);
-}
-
-function noteToFrequency(note) {
-  const match = String(note || "").trim().match(/^([A-Ga-g])([#bB]?)(-?\d)$/);
-  if (!match) {
-    return null;
-  }
-
-  const name = `${match[1].toUpperCase()}${match[2] || ""}`.toUpperCase();
-  const octave = Number(match[3]);
-  const semitone = NOTE_OFFSETS[name];
-
-  if (semitone === undefined || !Number.isFinite(octave)) {
-    return null;
-  }
-
-  const midi = semitone + (octave + 1) * 12;
-  return 440 * 2 ** ((midi - 69) / 12);
+  return url.origin;
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -692,6 +381,36 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+function inferMimeType(url) {
+  const pathname = new URL(url).pathname.toLowerCase();
+  if (pathname.endsWith(".mp3")) return "audio/mpeg";
+  if (pathname.endsWith(".flac")) return "audio/flac";
+  if (pathname.endsWith(".opus")) return "audio/ogg";
+  if (pathname.endsWith(".aac")) return "audio/aac";
+  return "audio/wav";
+}
+
+function extensionFromMimeType(mimeType, url) {
+  const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.includes("mpeg")) return "mp3";
+  if (normalized.includes("flac")) return "flac";
+  if (normalized.includes("opus")) return "opus";
+  if (normalized.includes("aac")) return "aac";
+
+  const extension = path.extname(new URL(url).pathname).replace(".", "").toLowerCase();
+  return extension || "wav";
+}
+
+function createHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) {
     return min;
@@ -703,26 +422,12 @@ function clampText(value, maxLength) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
-function round(value) {
-  return Math.round(value * 1000) / 1000;
-}
-
 function slugify(value) {
-  const slug = String(value || "lm-studio-audio")
+  const slug = String(value || "ace-step-audio")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "")
     .slice(0, 64);
 
-  return slug || "lm-studio-audio";
-}
-
-function hashString(value) {
-  let hash = 2166136261;
-  const text = String(value || "");
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
+  return slug || "ace-step-audio";
 }

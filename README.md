@@ -1,18 +1,23 @@
-# LM Studio WAV Generator
+# ACE-Step Music Generator
 
-A no-dependency local web app that connects to LM Studio's OpenAI-compatible API at `http://localhost:1234`, asks the loaded model for a structured sound plan, and renders a downloadable stereo `.wav` file.
+A no-dependency local web app that connects to the ACE-Step REST API at `http://localhost:8001`, submits a music generation task, waits for it to finish, and returns a downloadable audio file.
 
 ## Run
 
-1. Open LM Studio.
-2. Load a chat model.
-3. Start the local server:
+1. Start the ACE-Step API server:
+
+```powershell
+cd C:\path\to\ACE-Step-1.5
+uv run acestep-api
+```
+
+2. Start this app:
 
 ```powershell
 npm.cmd start
 ```
 
-4. Open `http://localhost:3000`.
+3. Open `http://localhost:3000`.
 
 If port `3000` is already being used, the app automatically tries the next available port and prints the URL. You can also choose a port yourself:
 
@@ -20,35 +25,32 @@ If port `3000` is already being used, the app automatically tries the next avail
 node server.js --port 3001
 ```
 
-You can also run the server directly:
+You can change the ACE-Step endpoint with:
 
 ```powershell
-node server.js
-```
-
-You can change the LM Studio endpoint with:
-
-```powershell
-$env:LM_STUDIO_URL="http://localhost:1234"
+$env:ACE_STEP_URL="http://localhost:8001"
 npm.cmd start
 ```
 
 ## Notes
 
-LM Studio does not provide a native text-to-speech endpoint. This app uses the local model to create a compact JSON score, then synthesizes the WAV file locally with oscillators, noise, envelopes, panning, and PCM encoding.
+ACE-Step uses an asynchronous API:
 
-## If LM Studio says "Failed to load model"
+1. `POST /release_task` creates a generation task.
+2. `POST /query_result` polls until the task succeeds or fails.
+3. `GET /v1/audio?path=...` downloads the generated audio.
 
-That error happens inside LM Studio before this app can talk to the model. Try these in order:
+This app wraps that workflow behind its own `/api/generate` endpoint so the browser only has to make one request.
 
-1. Use a smaller chat/instruct model first, such as a 3B to 7B GGUF model with a 4-bit quantization.
-2. Lower the model's context length in LM Studio before loading it.
-3. If you are using GPU acceleration, reduce GPU offload or turn off KV cache GPU offload if VRAM is tight.
-4. Make sure the LM Studio server is running from the Developer tab.
-5. Confirm the API is reachable:
+ACE-Step requires generated audio durations of at least 10 seconds. The app requests WAV output by default.
+
+## If ACE-Step is not responding
+
+Confirm the API server is reachable:
 
 ```powershell
-Invoke-RestMethod http://localhost:1234/v1/models
+Invoke-RestMethod http://localhost:8001/health
+Invoke-RestMethod http://localhost:8001/v1/models
 ```
 
-On Windows, LM Studio recommends AVX2 CPU support, at least 16GB RAM, and at least 4GB dedicated VRAM. Larger models can need much more than that.
+If model loading fails, use ACE-Step's own launch scripts or reduce the model configuration for your GPU/CPU setup.

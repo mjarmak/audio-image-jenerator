@@ -2,7 +2,7 @@
   "name": "audio-image-generator",
   "version": "1.0.0",
   "private": true,
-  "description": "A local LM Studio powered prompt-to-WAV generator.",
+  "description": "A local ACE-Step powered prompt-to-music generator.",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
